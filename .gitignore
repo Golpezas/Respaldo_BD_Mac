@@ -1,0 +1,14 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+# Archivos específicos de secretos de Google Drive (RECOMENDADO)
+token.json
+credentials.json
+
+# Directorios y archivos de entorno
+venv/
+__pycache__/
+*.pyc
+
+# Opcional: Ignorar todos los archivos .json
+# Si agregas esta línea, ten cuidado: ignorará CUALQUIER archivo .json
+# incluyendo aquellos que quizás SÍ quieras subir (si tuvieras, por ejemplo, configuraciones públicas).
+# *.json
