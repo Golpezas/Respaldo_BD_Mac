@@ -1,0 +1,666 @@
+// Configuración global
+const BATCH_SIZE = 5;
+const SCRIPT_PROPERTIES = PropertiesService.getScriptProperties();
+const TIME_ZONE = "America/Argentina/Buenos_Aires";
+const SHEET_NAME = 'Respuestas de formulario 1';
+const FOLDER_NAME = 'Reportes semanales';
+const MAX_DOC_SIZE_BYTES = 400 * 1024 * 1024; // 400 MB en bytes
+const REQUIRED_HEADERS = [
+  "ID Pozo (Vandalismo)", "ID Pozo (Recorrido)", "ID Sitio (Vandalismo)", "ID Sitio (Recorrido)",
+  "Fecha", "Hora", "Móvil / Acude", "Tipo de Informe",
+  "Descripción de Vandalismo Pozo", "Descripción General", "Foto Frontal Pozo",
+  "Urgente (Pozo)", "Urgencia Pozo Atendida",
+  "Descripción de Vandalismo Sitio", "Descripción General Sitio", "Foto Frontal Sitio",
+  "Urgente (Sitio)", "Urgencia Sitio Atendida",
+  "Foto Adicional 1 Pozo", "Foto Adicional 1 Sitio"
+];
+
+// Función para validar si un documento existe y es accesible
+function isDocumentValid(docId) {
+  if (!docId) return false;
+  try {
+    DocumentApp.openById(docId);
+    return true;
+  } catch (e) {
+    Logger.log(`Documento no válido o sin acceso (ID: ${docId}): ${e.message}`);
+    return false;
+  }
+}
+
+// Nueva función para buscar un documento por nombre en la carpeta
+function findDocumentByName(folder, namePrefix) {
+  var dateStr = Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy");
+  var expectedName = `${namePrefix} - ${dateStr}`;
+  var files = folder.getFilesByName(expectedName);
+  if (files.hasNext()) {
+    var file = files.next();
+    Logger.log(`Documento encontrado: ${expectedName} (ID: ${file.getId()})`);
+    return file.getId();
+  }
+  return null;
+}
+
+// Función principal para iniciar el proceso
+function GenerarReportesAYSA() {
+  Logger.log("Iniciando GenerarReportesAYSA - " + new Date().toLocaleString("es-AR", { timeZone: TIME_ZONE }));
+
+  // Obtener carpeta
+  var folder = getOrCreateFolder();
+
+  // Obtener IDs de documentos
+  var pozoDocId = SCRIPT_PROPERTIES.getProperty('pozoDocId');
+  var sitioDocId = SCRIPT_PROPERTIES.getProperty('sitioDocId');
+
+  // Crear o validar documento de pozos
+  if (!isDocumentValid(pozoDocId)) {
+    Logger.log("ID de documento de pozos inválido o no accesible, buscando en carpeta...");
+    pozoDocId = findDocumentByName(folder, "Reporte Semanal Pozos");
+    if (!pozoDocId) {
+      Logger.log("No se encontró documento de pozos, creando uno nuevo...");
+      try {
+        var pozoDoc = DocumentApp.create("Reporte Semanal Pozos - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"));
+        pozoDocId = pozoDoc.getId();
+        SCRIPT_PROPERTIES.setProperty('pozoDocId', pozoDocId);
+        pozoDoc.getBody().appendParagraph("Reporte Semanal Pozos - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"))
+          .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+        DriveApp.getFileById(pozoDocId).moveTo(folder);
+        Logger.log(`Nuevo documento de pozos creado y movido a '${FOLDER_NAME}': ${pozoDocId}`);
+      } catch (e) {
+        Logger.log(`Error al crear/mover documento de pozos: ${e.message}`);
+        return;
+      }
+    } else {
+      SCRIPT_PROPERTIES.setProperty('pozoDocId', pozoDocId);
+      Logger.log(`Reutilizando documento de pozos encontrado: ${pozoDocId}`);
+    }
+    SCRIPT_PROPERTIES.deleteProperty('lastProcessedPozo');
+  } else {
+    Logger.log(`Reutilizando documento de pozos existente: ${pozoDocId}`);
+  }
+
+  // Crear o validar documento de sitios
+  if (!isDocumentValid(sitioDocId)) {
+    Logger.log("ID de documento de sitios inválido o no accesible, buscando en carpeta...");
+    sitioDocId = findDocumentByName(folder, "Reporte Semanal Sitios");
+    if (!sitioDocId) {
+      Logger.log("No se encontró documento de sitios, creando uno nuevo...");
+      try {
+        var sitioDoc = DocumentApp.create("Reporte Semanal Sitios - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"));
+        sitioDocId = sitioDoc.getId();
+        SCRIPT_PROPERTIES.setProperty('sitioDocId', sitioDocId);
+        sitioDoc.getBody().appendParagraph("Reporte Semanal Sitios - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"))
+          .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+        DriveApp.getFileById(sitioDocId).moveTo(folder);
+        Logger.log(`Nuevo documento de sitios creado y movido a '${FOLDER_NAME}': ${sitioDocId}`);
+      } catch (e) {
+        Logger.log(`Error al crear/mover documento de sitios: ${e.message}`);
+        return;
+      }
+    } else {
+      SCRIPT_PROPERTIES.setProperty('sitioDocId', sitioDocId);
+      Logger.log(`Reutilizando documento de sitios encontrado: ${sitioDocId}`);
+    }
+    SCRIPT_PROPERTIES.deleteProperty('lastProcessedSitio');
+  } else {
+    Logger.log(`Reutilizando documento de sitios existente: ${sitioDocId}`);
+  }
+
+  // Obtener datos de la hoja de cálculo
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    Logger.log(`Error: Hoja '${SHEET_NAME}' no encontrada`);
+    return;
+  }
+  var dataRange = sheet.getDataRange();
+  var data = dataRange.getValues();
+  if (data.length <= 1) {
+    Logger.log(`Error: No hay datos en la hoja '${SHEET_NAME}'`);
+    return;
+  }
+
+  var headers = data[0];
+  var colMap = {};
+  headers.forEach((header, index) => colMap[header] = index);
+
+  // Validar encabezados
+  for (var header of REQUIRED_HEADERS) {
+    if (colMap[header] === undefined) {
+      Logger.log(`Error: No se encontró el encabezado '${header}'`);
+      return;
+    }
+  }
+
+  // Obtener últimas entradas
+  Logger.log("Obteniendo últimas entradas para pozos y sitios");
+  var ultimosPozos = obtenerUltimaEntrada(data.slice(1), [colMap["ID Pozo (Vandalismo)"], colMap["ID Pozo (Recorrido)"]], colMap["Fecha"], colMap["Hora"]);
+  var ultimosSitios = obtenerUltimaEntrada(data.slice(1), [colMap["ID Sitio (Vandalismo)"], colMap["ID Sitio (Recorrido)"]], colMap["Fecha"], colMap["Hora"]);
+
+  // Validar datos de pozos y sitios
+  if (!ultimosPozos || Object.keys(ultimosPozos).length === 0) {
+    Logger.log("Advertencia: No se encontraron datos válidos para pozos");
+    ultimosPozos = {};
+  }
+  if (!ultimosSitios || Object.keys(ultimosSitios).length === 0) {
+    Logger.log("Advertencia: No se encontraron datos válidos para sitios");
+    ultimosSitios = {};
+  }
+  Logger.log(`Pozos encontrados: ${Object.keys(ultimosPozos).length}, Sitios encontrados: ${Object.keys(ultimosSitios).length}`);
+
+  // Procesar pozos y sitios
+  var lastProcessedPozo = parseInt(SCRIPT_PROPERTIES.getProperty('lastProcessedPozo') || '0');
+  var lastProcessedSitio = parseInt(SCRIPT_PROPERTIES.getProperty('lastProcessedSitio') || '0');
+  var pozoStatus = GenerarReportePozos(ultimosPozos, colMap, pozoDocId, lastProcessedPozo);
+  var sitioStatus = GenerarReporteSitios(ultimosSitios, colMap, sitioDocId, lastProcessedSitio);
+
+  // Determinar si se necesita otra ejecución
+  Logger.log(`PozoStatus: ${JSON.stringify(pozoStatus)}, SitioStatus: ${JSON.stringify(sitioStatus)}`);
+  if (pozoStatus.hasMore || sitioStatus.hasMore) {
+    Logger.log("Creando trigger para continuar procesamiento");
+    crearTrigger();
+    Logger.log("Procesamiento en curso. Se generarán más datos en la próxima ejecución.");
+  } else {
+    Logger.log("Procesamiento completado, eliminando triggers");
+    eliminarTriggers();
+    Logger.log("Reportes generados con éxito en la carpeta 'Reportes semanales' en Google Drive.");
+  }
+}
+
+// Función para obtener la última entrada por ID
+function obtenerUltimaEntrada(data, colIDs, colFecha, colHora) {
+  var ultimosDatos = {};
+  if (!data || data.length === 0) {
+    Logger.log("Advertencia: No hay datos para procesar en obtenerUltimaEntrada");
+    return ultimosDatos;
+  }
+
+  data.forEach(row => {
+    var id = row[colIDs[0]] || row[colIDs[1]];
+    if (id && id.toString().trim() !== "") {
+      if (!ultimosDatos[id] || isNewer(row, ultimosDatos[id], colFecha, colHora)) {
+        ultimosDatos[id] = row;
+      }
+    }
+  });
+  return ultimosDatos;
+}
+
+// Comparar fechas para determinar la más reciente
+function isNewer(newRow, oldRow, colFecha, colHora) {
+  var oldDate = new Date(oldRow[colFecha] + " " + oldRow[colHora]);
+  var newDate = new Date(newRow[colFecha] + " " + newRow[colHora]);
+  return newDate > oldDate;
+}
+
+// Función para generar reporte de pozos
+function GenerarReportePozos(data, colMap, docId, lastProcessed) {
+  if (!data || typeof data !== 'object') {
+    Logger.log("Error: Datos de pozos inválidos o vacíos");
+    return { hasMore: false };
+  }
+
+  var pozoIds = Object.keys(data);
+  Logger.log(`Procesando lote de pozos: ${pozoIds.length} IDs, desde ${lastProcessed}, total: ${pozoIds.length}`);
+
+  if (pozoIds.length === 0) {
+    Logger.log("No hay pozos por procesar");
+    return { hasMore: false };
+  }
+
+  var batch = pozoIds.slice(lastProcessed, lastProcessed + BATCH_SIZE);
+  if (batch.length === 0) {
+    Logger.log("No hay más pozos por procesar en este lote");
+    return { hasMore: false };
+  }
+
+  var currentDocId = docId;
+  var doc = openOrCreateDoc(currentDocId, "Reporte Semanal Pozos");
+
+  var body = doc.getBody();
+  appendDataToDoc(data, batch, body, colMap, "Pozo", currentDocId);
+
+  var newLastProcessed = lastProcessed + batch.length;
+  SCRIPT_PROPERTIES.setProperty('lastProcessedPozo', newLastProcessed.toString());
+  Logger.log(`Progreso de pozos actualizado: ${newLastProcessed}/${pozoIds.length}`);
+
+  return { hasMore: newLastProcessed < pozoIds.length };
+}
+
+// Función para generar reporte de sitios
+function GenerarReporteSitios(data, colMap, docId, lastProcessed) {
+  if (!data || typeof data !== 'object') {
+    Logger.log("Error: Datos de sitios inválidos o vacíos");
+    return { hasMore: false };
+  }
+
+  var sitioIds = Object.keys(data);
+  Logger.log(`Procesando lote de sitios: ${sitioIds.length} IDs, desde ${lastProcessed}, total: ${sitioIds.length}`);
+
+  if (sitioIds.length === 0) {
+    Logger.log("No hay sitios por procesar");
+    return { hasMore: false };
+  }
+
+  var batch = sitioIds.slice(lastProcessed, lastProcessed + BATCH_SIZE);
+  if (batch.length === 0) {
+    Logger.log("No hay más sitios por procesar en este lote");
+    return { hasMore: false };
+  }
+
+  var doc;
+  try {
+    doc = DocumentApp.openById(docId);
+    Logger.log(`Documento de sitios abierto: ${docId}`);
+  } catch (e) {
+    Logger.log(`Error al abrir documento de sitios (${docId}): ${e.message}, creando nuevo`);
+    var folder = getOrCreateFolder();
+    try {
+      doc = DocumentApp.create("Reporte Semanal Sitios - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"));
+      docId = doc.getId();
+      SCRIPT_PROPERTIES.setProperty('sitioDocId', docId);
+      doc.getBody().appendParagraph("Reporte Semanal Sitios - " + Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy"))
+        .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+      DriveApp.getFileById(docId).moveTo(folder);
+      Logger.log(`Nuevo documento de sitios creado y movido a '${FOLDER_NAME}': ${docId}`);
+    } catch (e) {
+      Logger.log(`Error al crear/mover documento de sitios: ${e.message}`);
+      throw new Error(`No se pudo crear el documento de sitios: ${e.message}`);
+    }
+  }
+
+  var body = doc.getBody();
+  appendDataToDoc(data, batch, body, colMap, "Sitio");
+
+  var newLastProcessed = lastProcessed + batch.length;
+  SCRIPT_PROPERTIES.setProperty('lastProcessedSitio', newLastProcessed.toString());
+  Logger.log(`Progreso de sitios actualizado: ${newLastProcessed}/${sitioIds.length}`);
+
+  return { hasMore: newLastProcessed < sitioIds.length };
+}
+
+// Función mejorada para añadir datos al documento
+function appendDataToDoc(data, ids, body, colMap, tipo, docId) {
+  var folder = getOrCreateFolder();
+  var currentDocId = docId || SCRIPT_PROPERTIES.getProperty(tipo === "Pozo" ? 'pozoDocId' : 'sitioDocId');
+  var doc = DocumentApp.openById(currentDocId);
+  var body = doc.getBody();
+  var continuationNumber = 1; // Para nombrar continuaciones
+
+  ids.forEach(id => {
+    // Verificar tamaño antes de añadir
+    var file = DriveApp.getFileById(currentDocId);
+    var size = file.getSize();
+    Logger.log(`Tamaño actual del documento ${tipo} (${currentDocId}): ${size} bytes`);
+
+    if (size > MAX_DOC_SIZE_BYTES && tipo === "Pozo") {
+      Logger.log(`Documento ${tipo} excede 400 MB. Creando continuación...`);
+      var dateStr = Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy");
+      var newName = `Reporte Semanal Pozos - Continuación ${continuationNumber} - ${dateStr}`;
+      try {
+        var newDoc = DocumentApp.create(newName);
+        currentDocId = newDoc.getId();
+        SCRIPT_PROPERTIES.setProperty('pozoDocId', currentDocId); // Actualizar el ID principal a la continuación
+        newDoc.getBody().appendParagraph(newName)
+          .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+        DriveApp.getFileById(currentDocId).moveTo(folder);
+        Logger.log(`Nuevo documento continuación creado: ${currentDocId}`);
+        continuationNumber++;
+        doc = newDoc;
+        body = newDoc.getBody();
+      } catch (e) {
+        Logger.log(`Error al crear documento continuación: ${e.message}`);
+        return;
+      }
+    }
+
+    var row = data[id];
+    Logger.log(`Añadiendo datos para ${tipo} ID: ${id}`);
+
+    // Agregar un título para la entrada
+    body.appendParagraph(`${tipo} ID: ${id}`)
+        .setHeading(DocumentApp.ParagraphHeading.HEADING2)
+        .setAttributes({ 'BOLD': true });
+
+    // Crear una tabla para los detalles principales
+    var table = body.appendTable();
+    var headers = ["Campo", "Valor"];
+    var tableData = [
+      ["Fecha", Utilities.formatDate(row[colMap["Fecha"]], TIME_ZONE, "dd/MM/yyyy")],
+      ["Hora", Utilities.formatDate(row[colMap["Hora"]], TIME_ZONE, "HH:mm")],
+      ["Móvil / Acude", row[colMap["Móvil / Acude"]] || "No especificado"],
+      ["Tipo de Informe", row[colMap["Tipo de Informe"]] || "No especificado"],
+      ["Urgencia", row[colMap[tipo === "Pozo" ? "Urgente (Pozo)" : "Urgente (Sitio)"]] === "Sí" 
+        ? `Urgente, Atendido: ${row[colMap[tipo === "Pozo" ? "Urgencia Pozo Atendida" : "Urgencia Sitio Atendida"]] || "No especificado"}` 
+        : "No urgente"]
+    ];
+
+    // Estilo de la tabla
+    var headerRow = table.appendTableRow();
+    headers.forEach(header => {
+      var cell = headerRow.appendTableCell(header);
+      cell.setBackgroundColor('#d3d3d3');
+      cell.getChild(0).asText().setBold(true);
+    });
+
+    // Añadir datos a la tabla
+    tableData.forEach(dataRow => {
+      var row = table.appendTableRow();
+      dataRow.forEach(cellData => {
+        row.appendTableCell(cellData.toString());
+      });
+    });
+
+    // Establecer bordes y espaciado
+    table.setBorderWidth(1);
+    table.setAttributes({ 'MARGIN_TOP': 10, 'MARGIN_BOTTOM': 10 });
+
+    // Agregar sección de descripción
+    var descripcionVandalismoCol = tipo === "Pozo" ? colMap["Descripción de Vandalismo Pozo"] : colMap["Descripción de Vandalismo Sitio"];
+    var descripcionGeneralCol = tipo === "Pozo" ? colMap["Descripción General"] : colMap["Descripción General Sitio"];
+    var descripcion = row[descripcionVandalismoCol] || row[descripcionGeneralCol] || "No se proporcionó descripción.";
+    body.appendParagraph("Descripción")
+        .setHeading(DocumentApp.ParagraphHeading.HEADING3)
+        .setAttributes({ 'BOLD': true });
+    body.appendParagraph(descripcion)
+        .setAttributes({ 'FONT_SIZE': 11, 'LINE_SPACING': 1.15 });
+
+    // Agregar imágenes en una tabla de dos columnas
+    var fotoCol = tipo === "Pozo" ? colMap["Foto Frontal Pozo"] : colMap["Foto Frontal Sitio"];
+    var fotoAdicionalCol = tipo === "Pozo" ? colMap["Foto Adicional 1 Pozo"] : colMap["Foto Adicional 1 Sitio"];
+    var imageUrl = row[fotoCol];
+    var imageAdicionalUrl = row[fotoAdicionalCol];
+    var hasImages = false;
+
+    Logger.log(`Procesando imágenes para ${tipo} ID ${id}: Foto Frontal=${imageUrl}, Foto Adicional=${imageAdicionalUrl}`);
+
+    // Crear una tabla para las imágenes
+    var imageTable = body.appendTable();
+    var imageRow = imageTable.appendTableRow();
+    Logger.log(`Tabla de imágenes creada para ${tipo} ID ${id}`);
+
+    // Procesar la primera imagen (Foto Frontal)
+    if (imageUrl && imageUrl.toString().trim() !== "") {
+      try {
+        var fileId = imageUrl.match(/id=([a-zA-Z0-9_-]+)/)?.[1];
+        Logger.log(`Foto Frontal ID extraído: ${fileId}`);
+        if (fileId) {
+          var image = DriveApp.getFileById(fileId);
+          var cell = imageRow.appendTableCell();
+          var insertedImage = cell.appendImage(image);
+          Logger.log(`Imagen frontal insertada para ${tipo} ID ${id}, dimensiones originales: ${insertedImage.getWidth()}x${insertedImage.getHeight()} píxeles`);
+          insertedImage.setWidth(360).setHeight(360);
+          hasImages = true;
+          Logger.log(`Imagen frontal para ${tipo} ID ${id} redimensionada a 360x360 píxeles`);
+        } else {
+          Logger.log(`URL de imagen frontal inválida para ${tipo} ID ${id}: ${imageUrl}`);
+          imageRow.appendTableCell(`Advertencia: URL de imagen frontal inválida para el ID ${id}.`)
+              .getChild(0).asText().setItalic(true).setForegroundColor('#FF0000');
+        }
+      } catch (e) {
+        Logger.log(`Error al insertar imagen frontal para ${tipo} ID ${id}: ${e.message}`);
+        imageRow.appendTableCell(`Advertencia: No se pudo insertar la imagen frontal para el ID ${id}. Verifique la URL y permisos.`)
+            .getChild(0).asText().setItalic(true).setForegroundColor('#FF0000');
+      }
+    } else {
+      Logger.log(`No se proporcionó foto frontal para ${tipo} ID ${id}`);
+      imageRow.appendTableCell(`No se proporcionó foto frontal para ${tipo} ID ${id}.`)
+          .getChild(0).asText().setItalic(true);
+    }
+
+    // Procesar la segunda imagen (Foto Adicional 1)
+    if (imageAdicionalUrl && imageAdicionalUrl.toString().trim() !== "") {
+      try {
+        var fileIdAdicional = imageAdicionalUrl.match(/id=([a-zA-Z0-9_-]+)/)?.[1];
+        Logger.log(`Foto Adicional ID extraído: ${fileIdAdicional}`);
+        if (fileIdAdicional) {
+          var imageAdicional = DriveApp.getFileById(fileIdAdicional);
+          var cell = imageRow.appendTableCell();
+          var insertedImageAdicional = cell.appendImage(imageAdicional);
+          Logger.log(`Imagen adicional insertada para ${tipo} ID ${id}, dimensiones originales: ${insertedImageAdicional.getWidth()}x${insertedImageAdicional.getHeight()} píxeles`);
+          insertedImageAdicional.setWidth(360).setHeight(360);
+          hasImages = true;
+          Logger.log(`Imagen adicional para ${tipo} ID ${id} redimensionada a 360x360 píxeles`);
+        } else {
+          Logger.log(`URL de imagen adicional inválida para ${tipo} ID ${id}: ${imageAdicionalUrl}`);
+          imageRow.appendTableCell(`Advertencia: URL de imagen adicional inválida para el ID ${id}.`)
+              .getChild(0).asText().setItalic(true).setForegroundColor('#FF0000');
+        }
+      } catch (e) {
+        Logger.log(`Error al insertar imagen adicional para ${tipo} ID ${id}: ${e.message}`);
+        imageRow.appendTableCell(`Advertencia: No se pudo insertar la imagen adicional para el ID ${id}. Verifique la URL y permisos.`)
+            .getChild(0).asText().setItalic(true).setForegroundColor('#FF0000');
+      }
+    } else {
+      Logger.log(`No se proporcionó foto adicional para ${tipo} ID ${id}`);
+      imageRow.appendTableCell(`No se proporcionó foto adicional para ${tipo} ID ${id}.`)
+          .getChild(0).asText().setItalic(true);
+    }
+
+    // Agregar título para la sección de imágenes y ajustar la tabla
+    if (hasImages) {
+      body.insertParagraph(body.getChildIndex(imageTable), `Fotos ${tipo}`)
+          .setHeading(DocumentApp.ParagraphHeading.HEADING3)
+          .setAttributes({ 'BOLD': true });
+      imageTable.setBorderWidth(0);
+      imageTable.setAttributes({ 'MARGIN_TOP': 10, 'MARGIN_BOTTOM': 10 });
+      Logger.log(`Tabla de imágenes configurada para ${tipo} ID ${id} con imágenes válidas`);
+    } else {
+      body.removeChild(imageTable);
+      body.appendParagraph(`No se proporcionaron fotos para ${tipo} ID ${id}.`)
+          .setAttributes({ 'ITALIC': true });
+      Logger.log(`Tabla de imágenes eliminada para ${tipo} ID ${id} porque no hay imágenes válidas`);
+    }
+
+    // Agregar una línea divisoria y salto de página
+    body.appendHorizontalRule();
+    body.appendPageBreak();
+    Logger.log(`Entrada completada para ${tipo} ID ${id} con línea divisoria y salto de página`);
+  });
+}
+
+// Resto de las funciones (sin cambios)
+function getOrCreateFolder() {
+  var folders = DriveApp.getFoldersByName(FOLDER_NAME);
+  var folder;
+  if (folders.hasNext()) {
+    folder = folders.next();
+    Logger.log(`Carpeta '${FOLDER_NAME}' encontrada: ${folder.getId()}`);
+  } else {
+    folder = DriveApp.createFolder(FOLDER_NAME);
+    Logger.log(`Carpeta '${FOLDER_NAME}' creada: ${folder.getId()}`);
+  }
+  return folder;
+}
+
+function crearTrigger() {
+  eliminarTriggers();
+  ScriptApp.newTrigger('GenerarReportesAYSA')
+    .timeBased()
+    .after(30 * 1000)
+    .create();
+  Logger.log("Trigger creado para continuar procesamiento");
+}
+
+function eliminarTriggers() {
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'GenerarReportesAYSA') {
+      ScriptApp.deleteTrigger(trigger);
+      Logger.log(`Trigger eliminado: ${trigger.getUniqueId()}`);
+    }
+  });
+}
+
+function limpiarPropiedades() {
+  PropertiesService.getScriptProperties().deleteAllProperties();
+  Logger.log("Todas las propiedades limpiadas");
+}
+
+// ===================================================================
+// NUEVAS FUNCIONES INDEPENDIENTES (NO MODIFICAN TU CÓDIGO ORIGINAL)
+// ===================================================================
+
+// === GENERAR SOLO POZOS (INDEPENDIENTE) ===
+function GenerarReportePozos() {
+  Logger.log("=== INICIANDO REPORTE SOLO POZOS ===");
+  procesarSoloTipo("Pozo", "pozoDocId", "lastProcessedPozo", "Reporte Semanal Pozos");
+}
+
+// === GENERAR SOLO SITIOS (INDEPENDIENTE) ===
+function GenerarReporteSitios() {
+  Logger.log("=== INICIANDO REPORTE SOLO SITIOS ===");
+  procesarSoloTipo("Sitio", "sitioDocId", "lastProcessedSitio", "Reporte Semanal Sitios");
+}
+
+// === FUNCIÓN REUTILIZABLE PARA PROCESAR UN TIPO (POZO O SITIO) ===
+function procesarSoloTipo(tipo, docIdProp, lastProcessedProp, nombreBase) {
+  const folder = getOrCreateFolder();
+  const todayStr = Utilities.formatDate(new Date(), TIME_ZONE, "dd-MM-yyyy");
+  const expectedName = `${nombreBase} - ${todayStr}`;
+
+  // --- 1. Obtener o crear documento ---
+  let docId = SCRIPT_PROPERTIES.getProperty(docIdProp);
+  let isNewDoc = false;
+
+  if (!docId || !isDocumentValid(docId)) {
+    Logger.log(`Documento ${tipo} no válido o no accesible, buscando...`);
+    docId = findDocumentByName(folder, nombreBase);
+    if (!docId) {
+      Logger.log(`No encontrado, creando nuevo documento ${tipo}...`);
+      const doc = DocumentApp.create(expectedName);
+      docId = doc.getId();
+      SCRIPT_PROPERTIES.setProperty(docIdProp, docId);
+      doc.getBody().appendParagraph(expectedName)
+        .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+      DriveApp.getFileById(docId).moveTo(folder);
+      isNewDoc = true;
+      Logger.log(`Nuevo documento ${tipo} creado: ${docId}`);
+    } else {
+      SCRIPT_PROPERTIES.setProperty(docIdProp, docId);
+      Logger.log(`Reutilizando documento ${tipo} encontrado: ${docId}`);
+    }
+  } else {
+    const file = DriveApp.getFileById(docId);
+    if (file.getName() !== expectedName) {
+      Logger.log(`Documento ${tipo} es de otro día. Creando nuevo...`);
+      const doc = DocumentApp.create(expectedName);
+      docId = doc.getId();
+      SCRIPT_PROPERTIES.setProperty(docIdProp, docId);
+      doc.getBody().appendParagraph(expectedName)
+        .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+      DriveApp.getFileById(docId).moveTo(folder);
+      isNewDoc = true;
+      Logger.log(`Nuevo documento ${tipo} creado (nuevo día): ${docId}`);
+    } else {
+      Logger.log(`Reutilizando documento ${tipo} del día: ${docId}`);
+    }
+  }
+
+  // --- 2. Reiniciar progreso solo si es documento NUEVO ---
+  if (isNewDoc) {
+    SCRIPT_PROPERTIES.deleteProperty(lastProcessedProp);
+    Logger.log(`Progreso ${tipo} reiniciado (nuevo documento)`);
+  }
+
+  // --- 3. Leer datos ---
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    Logger.log(`Error: Hoja '${SHEET_NAME}' no encontrada`);
+    return;
+  }
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    Logger.log("No hay datos en la hoja");
+    return;
+  }
+
+  const headers = data[0];
+  const colMap = {};
+  headers.forEach((h, i) => colMap[h] = i);
+
+  for (const h of REQUIRED_HEADERS) {
+    if (colMap[h] === undefined) {
+      Logger.log(`Error: Falta encabezado '${h}'`);
+      return;
+    }
+  }
+
+  const idCols = tipo === "Pozo"
+    ? [colMap["ID Pozo (Vandalismo)"], colMap["ID Pozo (Recorrido)"]]
+    : [colMap["ID Sitio (Vandalismo)"], colMap["ID Sitio (Recorrido)"]];
+
+  const ultimos = obtenerUltimaEntrada(data.slice(1), idCols, colMap["Fecha"], colMap["Hora"]);
+  const ids = Object.keys(ultimos);
+  if (ids.length === 0) {
+    Logger.log(`No hay datos de ${tipo} para procesar`);
+    return;
+  }
+
+  // --- 4. Procesar lote ---
+  let lastProcessed = parseInt(SCRIPT_PROPERTIES.getProperty(lastProcessedProp) || '0');
+  if (lastProcessed >= ids.length) {
+    Logger.log(`Ya se procesaron todos los ${tipo}s. Nada que hacer.`);
+    return;
+  }
+
+  const batch = ids.slice(lastProcessed, lastProcessed + BATCH_SIZE);
+  if (batch.length === 0) {
+    Logger.log(`No hay más ${tipo}s por procesar en este lote`);
+    return;
+  }
+
+  // --- 5. Abrir documento y añadir datos ---
+  let doc;
+  try {
+    doc = DocumentApp.openById(docId);
+  } catch (e) {
+    Logger.log(`Error al abrir documento ${tipo}: ${e.message}. Intentando recrear...`);
+    const newDoc = DocumentApp.create(expectedName);
+    docId = newDoc.getId();
+    SCRIPT_PROPERTIES.setProperty(docIdProp, docId);
+    newDoc.getBody().appendParagraph(expectedName).setHeading(DocumentApp.ParagraphHeading.HEADING1);
+    DriveApp.getFileById(docId).moveTo(folder);
+    doc = newDoc;
+    lastProcessed = 0;
+    SCRIPT_PROPERTIES.setProperty(lastProcessedProp, '0');
+    Logger.log(`Documento ${tipo} recreado: ${docId}`);
+  }
+
+  const body = doc.getBody();
+  appendDataToDoc(ultimos, batch, body, colMap, tipo, docId);
+
+  const newLastProcessed = lastProcessed + batch.length;
+  SCRIPT_PROPERTIES.setProperty(lastProcessedProp, newLastProcessed.toString());
+  Logger.log(`Progreso ${tipo}: ${newLastProcessed}/${ids.length}`);
+
+  // --- 6. ¿Necesita más ejecuciones? ---
+  if (newLastProcessed < ids.length) {
+    Logger.log(`Quedan ${ids.length - newLastProcessed} ${tipo}s. Creando trigger...`);
+    crearTriggerParaTipo(tipo);
+  } else {
+    Logger.log(`Reporte de ${tipo}s completado.`);
+  }
+}
+
+// === CREAR TRIGGER ESPECÍFICO PARA UN TIPO ===
+function crearTriggerParaTipo(tipo) {
+  eliminarTriggers(); // Elimina todos los de GenerarReportesAYSA
+  const handler = tipo === "Pozo" ? "GenerarReportePozos" : "GenerarReporteSitios";
+  ScriptApp.newTrigger(handler)
+    .timeBased()
+    .after(30 * 1000)
+    .create();
+  Logger.log(`Trigger creado para continuar ${tipo}`);
+}
+
+// === MODIFICAR eliminarTriggers() PARA NO AFECTAR TRIGGERS INDIVIDUALES ===
+function eliminarTriggers() {
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    const handler = trigger.getHandlerFunction();
+    if (handler === 'GenerarReportesAYSA' || 
+        handler === 'GenerarReportePozos' || 
+        handler === 'GenerarReporteSitios') {
+      ScriptApp.deleteTrigger(trigger);
+      Logger.log(`Trigger eliminado: ${handler}`);
+    }
+  });
+}
