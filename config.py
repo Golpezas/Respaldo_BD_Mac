@@ -10,7 +10,7 @@ DATE_COLUMN = "Marca temporal" # AJUSTA ESTO SI EL NOMBRE DE LA COLUMNA ES DIFER
 # --- CONFIGURACIÓN DE RESPALDO POR MES ---
 # Define el mes y año que deseas respaldar.
 # Por ejemplo, para respaldar Septiembre de 2025:
-TARGET_MONTH = 11 
+TARGET_MONTH = 12 
 TARGET_YEAR = 2025
 
 # --- CONFIGURACIÓN DE RUTAS LOCALES ---
